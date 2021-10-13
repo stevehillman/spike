@@ -143,7 +143,7 @@ for (my $i=0;$i < $total_waves;$i++)
         $wavhdr1 = pack('H*',"52494646FFFFFF7F57415645666D7420100000000100");
         $freq = 44100;
         # $freq = 22050 if ($i2 == 9);
-        $wavhdr2 = pack('SSH*',$channels,$freq,"000010B10200040010006461746100FFFF7F");
+        $wavhdr2 = pack('SLLSH*',$channels,$freq,$freq*$channels*2,$channels*2,"10006461746100FFFF7F");
 
         $chans = ($channels == 2) ? "" : "-mono";
         $snum = sprintf("%04d",$i);
