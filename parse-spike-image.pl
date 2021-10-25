@@ -6,7 +6,7 @@
 
 use Getopt::Std;
 
-getopts('si') or die "Usage: parse-spike-image.pl -s -i -f <filename>\n   -s   Create sound files\n   -i   Create image files\n";
+getopts('si') or die "Usage: parse-spike-image.pl -s -i <filename>\n   -s   Create sound files\n   -i   Create image files\n";
 
 $make_sounds = $opt_s;
 $make_images = $opt_i;
@@ -14,8 +14,9 @@ $file = $ARGV[0];
 
 die "$file doesn't seem to exist\n" if (! -e $file);
 
-mkdir "sounds" if ( ! -d "sounds");
-mkdir "images" if ( ! -d "images");
+mkdir "newsounds" if ( ! -d "newsounds");
+mkdir "newimages" if ( ! -d "newimages");
+mkdir "smallimages" if ( ! -d "smallimages");
 
 open(IN,"<:raw",$file) or die "Can't open $file for reading in byte mode\n";
 
@@ -182,20 +183,63 @@ $BMPhdr = "BM" . pack('LLLLLLSSLLLLLLH*',2166,0,118,40,128,32,1,4,0,0,1280,320,1
 for($i=0;$i < $total_images;$i++)
 {
     seek(IN,$image_addresses[$i],SEEK_SET);
-    read(IN,$buf,11);
+    read(IN,$buf,13);
     ($imgnum,$l2,$w,$h,$c1) = unpack('LLSSC',$buf);
-    $bytes = $image_addresses[$i+1]-$image_addresses[$i]-11;
-    printf ("Num: %05d; Width: %03d; Height: %03d l2: %08X; bytes: %04d\n",$imgnum,$w,$h,$l2,$bytes);
-
+    $bytes = $image_addresses[$i+1]-$image_addresses[$i]-13;
+    printf ("Num: %05d; Width: %03d; Height: %03d l2: %08X; bytes: %04d; c1: %02X; address: %9d\n",$imgnum,$w,$h,$l2,$bytes,$c1,$image_addresses[$i]);
+    # C1 is the compression type: 
+    #  0 = raw - one byte per pixel
+    #  1 = column compression. Bytes go top to bottom, left to right
+    #  7 = row compression
+    # 12 = "row 16": one nybble per pixel
     if ($opt_i)
     {
-        if ($w == 128 && $h == 32 && $bytes > 2000)
-        {
+        if ($w+$h > 20)  # Skip tiny images
+        {	
             my $numfmt = sprintf("%05d",$imgnum);
-            open(OUT,">:raw", "images/image$numfmt.bmp");
-            print OUT $BMPhdr;
-            read(IN,$buf,2048);
-            print OUT flipbuf($buf,64,32);
+            next if (-e "newimages/image$numfmt.bmp" || -e "smallimages/image$numfmt.bmp"); # Skip images we've already done
+            $w1 = $w;$padding=0;
+            # Special cases first
+            if ($w == 55 && $c1 == 12) { $w1 = 56;}
+            elsif ($w == 125 && $c1 == 12) { $w1 = 128; $padding = 1;}
+            elsif ($w == 127 && $c1 == 12) { $w1 = 128;}
+            elsif ($w%8 > 0)
+            {
+                # bmp files are always padded out to a multiple of 4 bytes per scan line
+                $w1 = $w + (8-($w%8));
+                $padding=int(($w1-$w)/2);
+            }
+
+            if ($c1 == 1) # Column compression
+            {
+                next if ($bytes < 0);
+                read(IN,$buf,$bytes);
+                $newbuf = flipbuf(uncompresscolumns($buf,$w,$h),$w,$h,0,$padding);
+            }
+            elsif ($c1 == 7) # Row compression
+            {
+                next if ($bytes < 0);
+                read(IN,$buf,$bytes);
+                $newbuf = flipbuf(uncompressrows($buf,$w,$h),$w,$h,0,$padding);
+            }
+            else # Raw or nibble compression
+            {  
+                next;  # skip these for now.
+                if ($c1 == 12) { read(IN,$buf,($w*$h/2));} else { read(IN,$buf,$w*$h);}
+                $newbuf = flipbuf($buf,$w,$h,$c1,$padding);
+            }
+            # If it's bigger than a character and uses standard 4-bit or 1 byte encoding per pixel, save it
+            $BMPhdr = "BM" . pack('LLLLLLSSLLLLLLH*',118+($w1*$h/2),0,118,40,$w,$h,1,4,0,0,1280,1280,16,0,"00000000111111002222220033333300444444005555550066666600777777008888880099999900AAAAAA00BBBBBB00CCCCCC00DDDDDD00EEEEEE00FFFFFF00");
+            if ($w == 128)
+            {
+                    open(OUT,">:raw", "newimages/image$numfmt.bmp");
+            }
+            else
+            {
+            open(OUT,">:raw", "smallimages/image$numfmt.bmp");
+            }
+                print OUT $BMPhdr;
+            print OUT $newbuf;
             close OUT;
         }
     }
@@ -205,23 +249,123 @@ for($i=0;$i < $total_images;$i++)
 close IN;
 exit;
 
-# Stern stores its DMD images Y-inverted - presumably that's how they get clocked into the DMD. Flip them back
+# BMP images are Y-inverted. Flip source image
 # To do that, we have to know the X-Y size of the image in bytes
-# We also need to flip the high and low nibble of each byte
+# If width is 64 bytes, We also need to flip the high and low nibble of each byte
+# If width is 128 bytes, combine two consecutive bytes into one
 sub flipbuf
 {
-    my ($buf,$x,$y) = @_;
+    my ($buf,$x,$y,$flag,$pad) = @_;
+    if ($flag==12 && $x%2 == 1) { $x = ($x+1)/2; }
+    elsif ($flag == 12) { $x = $x/2;}
     my @oldbuf = unpack("(a$x)*",$buf);
     my @newbuf;
     foreach $my_y (0..$y-1)
     {
         my @tmpbuf = split(//,$oldbuf[$y-$my_y-1]);
+	my @tmpbuf2 = ();
         foreach $my_x (0..$x-1)
         {
+	    next if ($flag==0 && $my_x % 2 == 1);
             $fl = unpack('C',$tmpbuf[$my_x]);
-            $tmpbuf[$my_x] = pack('C',(($fl<<4)&0xf0) | (($fl>>4)&0x0f));
+	    if ($flag==0 )
+	    {
+		$fl2 = unpack('C',$tmpbuf[$my_x+1]);
+            	$tmpbuf2[$my_x/2] = pack('C',(($fl<<4)&0xf0) | ($fl2&0x0f));
+	    }
+	    else
+	    {
+            	$tmpbuf2[$my_x] = pack('C',(($fl<<4)&0xf0) | (($fl>>4)&0x0f));
+	    }
         }
-        $newbuf[$my_y] = join('',@tmpbuf);
+	if ($pad > 0)
+	{
+	    foreach my $i (1..$pad)
+	    {
+		push @tmpbuf2,pack('C',0);
+	    }
+	}
+        $newbuf[$my_y] = join('',@tmpbuf2);
     }
     return join('',@newbuf);
+}
+
+sub uncompresscolumns
+{
+    my ($buf,$x,$y) = @_;
+    my @newbuf;
+    my @oldbuf = unpack("C*",$buf);
+    foreach $i (0..$x*$y)
+    {
+        $newbuf[$i] = pack('C',0);
+    }
+    my $i = 0;
+    my $my_x = 0;
+    my $my_y = 0;
+    my $r2 = $oldbuf[$i];
+    
+    while ($r2 != 0)
+    {
+        $i++;
+        my $r0 = $r2 & 0x03;
+        $r2 = $r2>>2;
+        do {
+            if ($r0 == 0) {
+                $newbuf[$my_y*$x+$my_x] = pack('C',$oldbuf[$i++]);
+            } elsif ($r0 == 1) {
+                $newbuf[$my_y*$x+$my_x] = pack('C',0);
+            } elsif ($r0 == 2) {
+                $newbuf[$my_y*$x+$my_x] = pack('C',15);
+            } else {
+                $newbuf[$my_y*$x+$my_x] = pack('C',$oldbuf[$i]);
+            }
+            $r2--;
+            $my_y++;
+            if ($my_y == $y)
+            {
+                $my_x++;
+                $my_y = 0;
+            }
+
+        } while ($r2 > 0);
+        $i++ if ($r0 == 3);
+        $r2 = $oldbuf[$i]; 
+    }
+    return join('',@newbuf);
+}
+
+sub uncompressrows
+{
+    my ($buf,$x,$y) = @_;
+    my @newbuf;
+    my @oldbuf = unpack("C*",$buf);
+    foreach $i (0..$x*$y)
+    {
+        $newbuf[$i] = pack('C',0);
+    }
+    my $i = 0;
+    my $ofst = 0;
+    my $r2 = $oldbuf[$i];
+    
+    while ($r2 != 0)
+    {
+        $i++;
+        my $r0 = $r2 & 0x03;
+        $r2 = $r2>>2;
+        do {
+            if ($r0 == 0) {
+                $newbuf[$ofst++] = pack('C',$oldbuf[$i++]);
+            } elsif ($r0 == 1) {
+                $newbuf[$ofst++] = pack('C',0);
+            } elsif ($r0 == 2) {
+                $newbuf[$ofst++] = pack('C',15);
+            } else {
+                $newbuf[$ofst++] = pack('C',$oldbuf[$i]);
+            }
+            $r2--;
+        } while ($r2 > 0);
+        $i++ if ($r0 == 3);
+        $r2 = $oldbuf[$i]; 
+    }
+    return join('',@newbuf); 
 }
