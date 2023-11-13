@@ -26,7 +26,7 @@ while (read(IN,$junk,52))
         next;
     }
     read(IN,my $dirhdr,20);
-    my ($numfiles,$length) = unpack 'x4 c x11 S', $dirhdr;
+    my ($numfiles,$length) = unpack 'x4 L x8 S', $dirhdr;
     print "Total files: $numfiles. Dir length: $length\n";
 
     read(IN,my $dir, $length);

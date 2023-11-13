@@ -14,8 +14,8 @@ $file = $ARGV[0];
 
 die "$file doesn't seem to exist\n" if (! -e $file);
 
-mkdir "newsounds" if ( ! -d "newsounds");
-mkdir "newimages" if ( ! -d "newimages");
+mkdir "sounds" if ( ! -d "sounds");
+mkdir "images" if ( ! -d "images");
 mkdir "smallimages" if ( ! -d "smallimages");
 
 open(IN,"<:raw",$file) or die "Can't open $file for reading in byte mode\n";
@@ -157,10 +157,13 @@ for (my $i=0;$i < $total_waves;$i++)
 
 print "Processing images\n";
 
-# Image extraction is a bit hit-or-miss. There are two 16-bit values in the header of each image that indicate (presumably) its width
-# and height (so most images are 128x32 - the size of the standard DMD), but there are a lot of images with the 128x32 that are NOT
-# actually that many bytes long (each byte is two pixels, as each pixel can have 16 shades). Since I only really cared about
-# the DMD animations, I skip over anything that's not long enough to fill the screen.
+# Image extraction: Stern defines several different image compression algorithms for each image. I have only seen 4 in use:
+# 00 - Raw - one byte per pixel
+# 01 - Column compression: Vertical runs of pixels can be compressed using 1 of 4 techniques
+# 07 - Row compression: Horizontal runs of pixels can be compressed using 1 of 4 techniques
+# 12 - "Row 16" - each pixel is 4 bits - 2 pixels per byte
+#
+# I've made one concession here - I skip over images whose width+height < 20 - these are all characters in character sets
 
 seek(IN,$image_table,SEEK_SET);
 my @image_addresses;
@@ -197,7 +200,7 @@ for($i=0;$i < $total_images;$i++)
         if ($w+$h > 20)  # Skip tiny images
         {	
             my $numfmt = sprintf("%05d",$imgnum);
-            next if (-e "newimages/image$numfmt.bmp" || -e "smallimages/image$numfmt.bmp"); # Skip images we've already done
+            next if (-e "images/image$numfmt.bmp" || -e "smallimages/image$numfmt.bmp"); # Skip images we've already done
             $w1 = $w;$padding=0;
             # Special cases first
             if ($w == 55 && $c1 == 12) { $w1 = 56;}
@@ -222,9 +225,13 @@ for($i=0;$i < $total_images;$i++)
                 read(IN,$buf,$bytes);
                 $newbuf = flipbuf(uncompressrows($buf,$w,$h),$w,$h,0,$padding);
             }
-            else # Raw or nibble compression
+            elsif ($c1 == 12) # nibble compression
+            {
+                read(IN,$buf,$bytes);
+                $newbuf = flipbuf(uncompressrows16($buf,$w,$h),$w,$h,0,$padding);
+            }
+            else
             {  
-                next;  # skip these for now.
                 if ($c1 == 12) { read(IN,$buf,($w*$h/2));} else { read(IN,$buf,$w*$h);}
                 $newbuf = flipbuf($buf,$w,$h,$c1,$padding);
             }
@@ -232,11 +239,11 @@ for($i=0;$i < $total_images;$i++)
             $BMPhdr = "BM" . pack('LLLLLLSSLLLLLLH*',118+($w1*$h/2),0,118,40,$w,$h,1,4,0,0,1280,1280,16,0,"00000000111111002222220033333300444444005555550066666600777777008888880099999900AAAAAA00BBBBBB00CCCCCC00DDDDDD00EEEEEE00FFFFFF00");
             if ($w == 128)
             {
-                    open(OUT,">:raw", "newimages/image$numfmt.bmp");
+                    open(OUT,">:raw", "images/image$numfmt.bmp");
             }
             else
             {
-            open(OUT,">:raw", "smallimages/image$numfmt.bmp");
+            	open(OUT,">:raw", "smallimages/image$numfmt.bmp");
             }
                 print OUT $BMPhdr;
             print OUT $newbuf;
@@ -368,4 +375,26 @@ sub uncompressrows
         $r2 = $oldbuf[$i]; 
     }
     return join('',@newbuf); 
+}
+
+sub uncompressrows16
+{
+    my ($buf,$x,$y) = @_;
+    my @newbuf;
+    my @oldbuf = unpack("C*",$buf);
+    my $i,$j,$fl;
+    foreach $i (0..$x*$y)
+    {
+        $newbuf[$i] = pack('C',0);
+    }
+    $i=0;$j=0;
+    while($j < ($x*$y))
+    {
+        $fl = $oldbuf[$i];
+        $newbuf[$j] = pack('C',$fl&0x0f);
+        $newbuf[$j+1] = pack('C',($fl>>4)&0x0f);
+        $i++;
+        $j+=2;
+    }
+    return join('',@newbuf);
 }
